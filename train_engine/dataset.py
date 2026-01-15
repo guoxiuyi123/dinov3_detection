@@ -1,4 +1,3 @@
-# 数据加载
 import torch
 import torchvision.transforms.functional as F
 from torchvision.datasets import CocoDetection
@@ -30,7 +29,12 @@ class CocoDetectionWrapper(CocoDetection):
         self._transforms = transforms
 
     def __getitem__(self, idx):
-        img, target = super().__getitem__(idx)
+        try:
+            img, target = super().__getitem__(idx)
+        except Exception as e:
+            print(f"Warning: Could not load image index {idx}, error: {e}. Replacing with index 0.")
+            img, target = super().__getitem__(0)
+
         image_id = self.ids[idx]
         target = {'image_id': image_id, 'annotations': target}
         img, target = self.prepare(img, target)
@@ -44,9 +48,22 @@ class CocoDetectionWrapper(CocoDetection):
         if isinstance(image_id, int): image_id = torch.tensor([image_id])
         anno = target["annotations"]
         anno = [obj for obj in anno if "iscrowd" not in obj or obj["iscrowd"] == 0]
-        boxes = [obj["bbox"] for obj in anno] 
-        if len(boxes) > 0:
-            boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+
+        raw_boxes = [obj["bbox"] for obj in anno]
+        raw_classes = [obj["category_id"] for obj in anno]
+        clean_boxes = []
+        clean_classes = []
+
+        for box, cls in zip(raw_boxes, raw_classes):
+            x, y, bw, bh = box
+            x = max(0, min(x, w)); y = max(0, min(y, h))
+            bw = min(bw, w - x); bh = min(bh, h - y)
+            if bw > 1.0 and bh > 1.0: # 过滤掉小于1像素的框
+                clean_boxes.append([x, y, bw, bh])
+                clean_classes.append(cls)
+
+        if len(clean_boxes) > 0:
+            boxes = torch.as_tensor(clean_boxes, dtype=torch.float32).reshape(-1, 4)
             boxes[:, 0] += boxes[:, 2] / 2
             boxes[:, 1] += boxes[:, 3] / 2
             image_size = torch.tensor([w, h, w, h], dtype=torch.float32)
@@ -54,8 +71,8 @@ class CocoDetectionWrapper(CocoDetection):
             boxes.clamp_(min=0.0, max=1.0)
         else:
             boxes = torch.zeros((0, 4), dtype=torch.float32)
-        classes = [obj["category_id"] for obj in anno]
-        classes = torch.tensor(classes, dtype=torch.int64)
+
+        classes = torch.tensor(clean_classes, dtype=torch.int64)
         target = {}
         target["boxes"] = boxes
         target["labels"] = classes
@@ -86,8 +103,4 @@ def nested_tensor_from_tensor_list(tensor_list):
     return NestedTensor(tensor, mask)
 
 def make_transforms(image_set):
-    normalize = Compose([
-        ToTensor(),
-        Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-    return normalize
+    return Compose([ToTensor(), Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
