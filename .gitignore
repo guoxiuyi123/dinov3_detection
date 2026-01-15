@@ -1,3 +1,4 @@
+# =========== 1. 官方原有规则 (保持不变) ===========
 build/
 dist/
 *.egg-info/
@@ -6,6 +7,8 @@ dist/
 **/.ipynb_checkpoints
 **/.ipynb_checkpoints/**
 
+# 注意：官方默认忽略了 notebooks 文件夹
+# 如果你想上传自己的笔记，可以在下面这行前面加个 # 号注释掉
 **/notebooks
 
 # Ignore shell scripts
@@ -16,3 +19,31 @@ dist/
 
 # Ignore vscode directory
 .vscode/
+
+# =========== 2. 必须补充的 AI 安全规则 (防止卡死) ===========
+
+# --- 忽略巨大的数据集 (最重要！) ---
+data/
+datasets/
+VOCdevkit/
+coco/
+imagenet/
+
+# --- 忽略模型权重文件 (几百MB到几GB) ---
+*.pth
+*.pt
+*.ckpt
+*.weights
+*.onnx
+
+# --- 忽略训练输出和日志 ---
+output/
+logs/
+runs/
+wandb/
+results/
+
+# --- 忽略虚拟环境 ---
+venv/
+.venv/
+env/
