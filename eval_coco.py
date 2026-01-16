@@ -13,7 +13,7 @@ COCO_ROOT = "/home/pc/gxy/dataset/coco2017/coco"
 IMG_PATH = os.path.join(COCO_ROOT, "images/val2017")
 ANN_PATH = os.path.join(COCO_ROOT, "annotations/instances_val2017.json")
 # 记得训练完改这里：checkpoint_epoch_0.pth
-HEAD_PATH = "/home/pc/gxy/DINO/dinov3/dinov3-main/output_checkpoints/checkpoint_epoch_0.pth"
+HEAD_PATH = "/home/pc/gxy/DINO/dinov3_detection/output_checkpoints/checkpoint_epoch_0.pth "
 RESULT_JSON = "coco_val_results_b16.json"
 REPO_DIR = "/home/pc/gxy/DINO/dinov3/dinov3-main"
 if REPO_DIR not in sys.path: sys.path.append(REPO_DIR)

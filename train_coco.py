@@ -43,6 +43,7 @@ def main():
     gpu_id, rank = setup_distributed()
     device = torch.device(f"cuda:{gpu_id}")
     
+    # 1. Config
     config = DetectionHeadConfig(
         num_classes=91, 
         hidden_dim=768,
@@ -54,13 +55,29 @@ def main():
         two_stage=True,
     )
     
-    # 2. Backbone
-    backbone = dinov3_vitb16(pretrained=True, weights=PRETRAIN_WEIGHTS)
+    # 2. Backbone (手动加载 + 解冻)
+    print("🏗️ Building Backbone...")
+    backbone = dinov3_vitb16(pretrained=False)
     
-    # 🥶 冻结 Backbone
-    for name, parameter in backbone.named_parameters():
-        parameter.requires_grad = False
+    if rank == 0:
+        print(f"📥 Loading backbone weights from: {PRETRAIN_WEIGHTS}")
     
+    if os.path.exists(PRETRAIN_WEIGHTS):
+        checkpoint = torch.load(PRETRAIN_WEIGHTS, map_location='cpu')
+        state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            k = k.replace("module.", "").replace("backbone.", "")
+            new_state_dict[k] = v
+        msg = backbone.load_state_dict(new_state_dict, strict=False)
+        if rank == 0:
+            print(f"✅ Weights Loaded. Missing keys: {len(msg.missing_keys)}")
+    
+    # === 🔓 [核心修改] 解冻 Backbone！ ===
+    # 官方策略冻结是为了在大规模集群上微调，在单机上我们需要由于数据量和Batch较小，解冻能加速收敛
+    for p in backbone.parameters():
+        p.requires_grad = True 
+        
     config.proposal_in_stride = 16
     config.proposal_tgt_strides = [8, 16, 32, 64]
     
@@ -105,13 +122,21 @@ def main():
         pin_memory=True
     )
 
-    # 6. Optimizer (仅优化 Head)
-    params_to_optimize = [p for p in model.parameters() if p.requires_grad]
+    # 6. Optimizer [核心修改：差分学习率]
+    # Backbone 用小火(1e-5)，Head 用大火(1e-4)
+    param_dicts = [
+        {
+            "params": [p for n, p in model.named_parameters() if "backbone" not in n and p.requires_grad],
+            "lr": 1e-4, 
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if "backbone" in n and p.requires_grad],
+            "lr": 1e-5, 
+        },
+    ]
 
-    # 🛡️ [关键修改] 极度保守的学习率: 1e-4 -> 1e-5 (甚至 2e-5)
-    # 对于不稳定的 loss，先用小火慢炖
-    base_lr = 2e-5 
-    optimizer = torch.optim.AdamW(params_to_optimize, lr=base_lr, weight_decay=1e-4)
+    base_lr = 1e-4 
+    optimizer = torch.optim.AdamW(param_dicts, lr=base_lr, weight_decay=1e-4)
 
     # 7. Scheduler
     warmup_iters = 1000
@@ -129,12 +154,13 @@ def main():
     max_epochs = 10
     
     if rank == 0:
-        print(f"Start training with FROZEN BACKBONE. Base LR: {base_lr}")
+        print(f"🚀 Start training. Backbone: UNFREEXED (LR 1e-5). Head LR: 1e-4.")
 
     for epoch in range(start_epoch, max_epochs):
         sampler_train.set_epoch(epoch)
-        if rank == 0: print(f"------ Epoch {epoch} ------")
-        
+        if rank == 0:
+            print(f"------ Epoch {epoch} ------")
+            
         for i, (samples, targets) in enumerate(data_loader_train):
             samples = samples.to(device)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -145,7 +171,6 @@ def main():
             weight_dict = criterion.weight_dict
             losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
-            # 再次检查 Loss
             if not torch.isfinite(losses):
                 print(f"Loss is {losses}, stopping training")
                 sys.exit(1)
@@ -153,21 +178,22 @@ def main():
             optimizer.zero_grad()
             losses.backward()
             
-            # 🛡️ [关键修改] 增加 clip_grad_value 防止单个离群梯度
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-            torch.nn.utils.clip_grad_value_(model.parameters(), 0.1)
             
             optimizer.step()
             lr_scheduler.step()
 
             if rank == 0 and i % 50 == 0:
                 current_lr = optimizer.param_groups[0]['lr']
-                print(f"Epoch {epoch} | Iter {i}/{iters_per_epoch} | Loss: {losses.item():.4f} | LR: {current_lr:.8f}")
+                l_bbox = loss_dict.get('loss_bbox', torch.tensor(0)).item()
+                l_ce = loss_dict.get('loss_ce', torch.tensor(0)).item()
+                print(f"Epoch {epoch} | Iter {i}/{iters_per_epoch} | Loss: {losses.item():.2f} (Box:{l_bbox:.2f} Cls:{l_ce:.2f}) | LR: {current_lr:.8f}")
 
         if rank == 0:
             output_dir = "output_checkpoints"
             os.makedirs(output_dir, exist_ok=True)
             checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch}.pth")
+            
             model_to_save = model.module if hasattr(model, 'module') else model
             torch.save({
                 'epoch': epoch,
